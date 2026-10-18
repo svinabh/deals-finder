@@ -24,7 +24,10 @@ function extractSearchQuery(content) {
   return searchQuery;
 }
 
-function requestSearchQuery(query, { apiKey, model = 'gpt-4o-mini' }) {
+function requestSearchQuery(query, { apiKey, model = 'gpt-4o-mini', baseUrl }) {
+  // Any OpenAI-compatible Chat Completions endpoint works (Groq, OpenRouter,
+  // Gemini's compat layer); default is OpenAI itself.
+  const endpoint = new URL(baseUrl || 'https://api.openai.com/v1');
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
       model,
@@ -40,8 +43,9 @@ function requestSearchQuery(query, { apiKey, model = 'gpt-4o-mini' }) {
     });
     let responseBody = '';
     const request = https.request({
-      hostname: 'api.openai.com',
-      path: '/v1/chat/completions',
+      hostname: endpoint.hostname,
+      port: endpoint.port || 443,
+      path: `${endpoint.pathname.replace(/\/+$/, '')}/chat/completions`,
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,

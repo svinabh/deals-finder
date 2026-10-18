@@ -98,8 +98,8 @@ function tokenMatchScore(queryToken, candidateTokens) {
     if (
       (token.length > 3 && token === `${queryToken}s`) ||
       (queryToken.length > 3 && queryToken === `${token}s`) ||
-      (token.length > 4 && token.startsWith(queryToken)) ||
-      (queryToken.length > 4 && queryToken.startsWith(token))
+      (token.length > 4 && queryToken.length > 2 && token.startsWith(queryToken)) ||
+      (queryToken.length > 4 && token.length > 2 && queryToken.startsWith(token))
     ) {
       best = Math.max(best, 0.88);
       continue;

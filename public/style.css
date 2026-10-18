@@ -1687,3 +1687,19 @@ body {
     padding: 0 0.5rem;
   }
 }
+
+/* ===== Demo mode labels (additive; no existing styles changed) ===== */
+.demo-pill {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  letter-spacing: 0.04em;
+}
+
+.provider-status[data-state="demo"] {
+  color: #92400e;
+}

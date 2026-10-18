@@ -162,9 +162,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const ai = data.ai || {};
         const liveState = provider.status === 'ok'
           ? 'Live merchant results.'
-          : provider.status === 'unavailable'
-            ? 'Merchant live search is not connected yet.'
-            : 'No cached listings used.';
+          : provider.status === 'demo'
+            ? 'Demo mode: sample listings — price aur delivery retailer website par confirm karein.'
+            : provider.status === 'unavailable'
+              ? 'Merchant live search is not connected yet.'
+              : 'No cached listings used.';
         const aiState = ai.status === 'ok'
           ? 'AI understood your request.'
           : ai.status === 'not_configured'
@@ -228,11 +230,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       const amazon = (data.providers || []).find(provider => provider.id === 'amazon_paapi');
       const aiConfigured = Boolean(data.ai && data.ai.configured);
+      const amazonConnected = Boolean(amazon && amazon.configured);
       if (!providerStatus || state.query) return;
-      providerStatus.textContent = `Live search only · ${
-        amazon && amazon.configured ? 'Amazon connected' : 'merchant feeds needed'
-      } · ${aiConfigured ? 'AI ready' : 'AI optional'}.`;
-      providerStatus.dataset.state = amazon && amazon.configured ? 'ok' : 'unavailable';
+      providerStatus.textContent = amazonConnected
+        ? `Live search only · Amazon connected · ${aiConfigured ? 'AI ready' : 'AI optional'}.`
+        : 'Demo mode: sample listings (demo data) · price aur delivery retailer website par confirm karein · live merchant feeds connect nahi hain · AI optional.';
+      providerStatus.dataset.state = amazonConnected ? 'ok' : 'demo';
     } catch (error) {
       console.warn('Provider status could not be loaded:', error.message);
       if (providerStatus && !state.query) {
@@ -316,8 +319,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const ageMinutes = checkedAt && Number.isFinite(checkedAt.getTime())
         ? Math.max(0, Math.floor((Date.now() - checkedAt.getTime()) / 60000))
         : null;
+      const isDemo = deal.is_demo === true;
       let freshnessLabel = 'Price freshness unknown';
-      if (deal.freshness_status === 'live_checked') {
+      if (isDemo) {
+        freshnessLabel = 'Sample price — retailer site par confirm karein';
+      } else if (deal.freshness_status === 'live_checked') {
         freshnessLabel = ageMinutes !== null && ageMinutes > 0
           ? `Price checked ${ageMinutes}m ago`
           : 'Price checked just now';
@@ -326,16 +332,20 @@ document.addEventListener('DOMContentLoaded', () => {
       else if (ageMinutes !== null && ageMinutes < 48 * 60) {
         freshnessLabel = `Index updated ${Math.floor(ageMinutes / 60)}h ago`;
       } else if (deal.freshness_status === 'stale') freshnessLabel = 'Old listing — recheck price';
-      const availabilityLabel = deal.delivery_status === 'verified_for_pincode'
-        ? `✓ In stock for ${state.pincode}`
-        : deal.is_verified_live
-          ? 'Stock checked · delivery unconfirmed'
-          : 'Availability not confirmed';
-      const locationLabel = deal.delivery_status === 'verified_for_pincode'
-        ? `📍 ${state.pincode} · checked`
-        : deal.delivery_status === 'pincode_listing_unverified'
-          ? `📍 ${state.pincode} listing · unverified`
-          : '📍 Delivery unconfirmed';
+      const availabilityLabel = isDemo
+        ? 'Delivery retailer website par confirm karein'
+        : deal.delivery_status === 'verified_for_pincode'
+          ? `✓ In stock for ${state.pincode}`
+          : deal.is_verified_live
+            ? 'Stock checked · delivery unconfirmed'
+            : 'Availability not confirmed';
+      const locationLabel = isDemo
+        ? `📍 ${state.pincode} · delivery retailer site par confirm karein`
+        : deal.delivery_status === 'verified_for_pincode'
+          ? `📍 ${state.pincode} · checked`
+          : deal.delivery_status === 'pincode_listing_unverified'
+            ? `📍 ${state.pincode} listing · unverified`
+            : '📍 Delivery unconfirmed';
       const isBestMatch = index === 0 && state.sortBy === 'best_match' && state.query;
       const isBestPrice = deal.best_price_for_match && deal.comparison_offer_count > 1;
 
@@ -351,9 +361,10 @@ document.addEventListener('DOMContentLoaded', () => {
               <span class="platform-icon">${icon}</span>
               ${escapeHtml(deal.platform)}
             </span>
+            ${isDemo ? '<span class="demo-pill">DEMO</span>' : ''}
             ${isBestMatch ? '<span class="best-match-pill">Best match</span>' : ''}
             ${isBestPrice ? '<span class="best-match-pill">Lowest listed price for this match</span>' : ''}
-            ${discount > 0 ? `<span class="discount-pill">-${discount}% listed</span>` : ''}
+            ${discount > 0 ? `<span class="discount-pill">-${discount}% ${isDemo ? 'sample' : 'listed'}</span>` : ''}
             ${deal.is_verified_live ? '<span class="badge-live"><span class="live-pulse"></span>LIVE CHECK</span>' : ''}
           </div>
 
@@ -404,6 +415,7 @@ document.addEventListener('DOMContentLoaded', () => {
               data-link="${escapeHtml(monetizedUrl)}"
               data-title="${escapeHtml(deal.title)}"
               data-price="${price}"
+              data-demo="${isDemo}"
               title="Copy deal link"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -423,7 +435,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const link = btn.getAttribute('data-link');
         const title = btn.getAttribute('data-title');
         const price = btn.getAttribute('data-price');
-        const shareText = `DealsFinder price snapshot\n${title}\nListed price: ₹${price}\nCheck price & availability: ${link}`;
+        const snapshotLabel = btn.getAttribute('data-demo') === 'true'
+          ? 'DealsFinder demo listing (sample price, not live)'
+          : 'DealsFinder price snapshot';
+        const priceLabel = btn.getAttribute('data-demo') === 'true'
+          ? `Sample price: ₹${price}`
+          : `Listed price: ₹${price}`;
+        const shareText = `${snapshotLabel}\n${title}\n${priceLabel}\nCheck price & availability: ${link}`;
 
         navigator.clipboard.writeText(shareText).then(() => {
           showToast('Deal & Affiliate Link copied to clipboard! 🚀', '📋');

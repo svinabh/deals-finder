@@ -58,6 +58,14 @@ async function run() {
     assert.strictEqual(requestOptions.path, '/v1/chat/completions');
     assert.strictEqual(requestPayload.model, 'unit-test-model');
     assert.strictEqual(requestPayload.messages[1].content, 'jogging ke joote under 3000 UK 7');
+
+    // Custom OpenAI-compatible endpoints (Groq/OpenRouter/Gemini) route correctly.
+    await understandSearchQuery('jogging ke joote under 3000 UK 7', {
+      apiKey: 'unit-test-key',
+      baseUrl: 'https://api.groq.com/openai/v1/'
+    });
+    assert.strictEqual(requestOptions.hostname, 'api.groq.com');
+    assert.strictEqual(requestOptions.path, '/openai/v1/chat/completions');
   } finally {
     https.request = originalRequest;
   }

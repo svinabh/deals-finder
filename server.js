@@ -4,13 +4,13 @@ const path = require('path');
 const url = require('url');
 const { spawn } = require('child_process');
 
-const { rankDeals, sortDeals } = require('./search_engine');
 const {
-  filterDealsForPincode,
-  getProviderDirectory,
-  hasSixDigitPincodeFormat
-} = require('./provider_registry');
-const { understandSearchQuery } = require('./ai_search');
+  buildProvidersResponse,
+  buildStatsResponse,
+  handleDealsRequest,
+  isAmazonSearchConfigured
+} = require('./search_pipeline');
+const { createAmazonSearchRunner } = require('./amazon_live_search');
 
 function loadLocalEnv() {
   const envFile = path.join(__dirname, '.env');
@@ -42,118 +42,14 @@ const STATUS_FILE = path.join(DATA_DIR, 'crawler_status.json');
 const PYTHON_PATH = process.env.PYTHON_PATH || 'python3';
 const CRAWLER_SCRIPT = path.join(__dirname, 'scraper', 'deals_crawler.py');
 const AMAZON_SEARCH_SCRIPT = path.join(__dirname, 'scraper', 'amazon_paapi.py');
-const AMAZON_SEARCH_CACHE_MS = 5 * 60 * 1000;
-const AMAZON_SEARCH_TIMEOUT_MS = 15000;
-const AMAZON_MIN_REQUEST_INTERVAL_MS = 1100;
 
 // Live in-memory cache of deals
 let deals = [];
 let isCrawling = false;
-const amazonSearchCache = new Map();
-const amazonSearchInFlight = new Map();
-let amazonSearchQueue = Promise.resolve();
-let lastAmazonSearchAt = 0;
-
-function callAmazonSearch(query) {
-  const task = new Promise(resolve => {
-    const proc = spawn(PYTHON_PATH, [AMAZON_SEARCH_SCRIPT, query], {
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const finish = result => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (result.status === 'ok' || result.status === 'unavailable') {
-        amazonSearchCache.set(query, { result, cachedAt: Date.now() });
-        if (amazonSearchCache.size > 100) {
-          amazonSearchCache.delete(amazonSearchCache.keys().next().value);
-        }
-      }
-      resolve(result);
-    };
-    const timeout = setTimeout(() => {
-      proc.kill();
-      finish({
-        status: 'error',
-        provider: 'amazon_paapi',
-        message: 'Amazon live search timed out. Try again in a moment.'
-      });
-    }, AMAZON_SEARCH_TIMEOUT_MS);
-
-    proc.stdout.on('data', chunk => {
-      stdout += chunk.toString();
-      if (stdout.length > 2 * 1024 * 1024) {
-        proc.kill();
-        finish({
-          status: 'error',
-          provider: 'amazon_paapi',
-          message: 'Amazon returned an unexpectedly large response.'
-        });
-      }
-    });
-    proc.stderr.on('data', chunk => {
-      stderr += chunk.toString();
-      if (stderr.length > 4096) stderr = stderr.slice(-4096);
-    });
-    proc.on('error', error => {
-      console.error(`[Amazon PA-API] Unable to start provider: ${error.message}`);
-      finish({
-        status: 'error',
-        provider: 'amazon_paapi',
-        message: 'Amazon live search could not start. Check the configured Python runtime.'
-      });
-    });
-    proc.on('close', code => {
-      if (settled) return;
-      if (code !== 0) {
-        console.error(`[Amazon PA-API] Provider exited ${code}: ${stderr.trim()}`);
-        finish({
-          status: 'error',
-          provider: 'amazon_paapi',
-          message: 'Amazon live search failed. Check provider configuration and logs.'
-        });
-        return;
-      }
-      try {
-        const result = JSON.parse(stdout);
-        finish(result);
-      } catch (error) {
-        console.error(`[Amazon PA-API] Invalid provider response: ${error.message}`);
-        finish({
-          status: 'error',
-          provider: 'amazon_paapi',
-          message: 'Amazon live search returned an invalid response.'
-        });
-      }
-    });
-  });
-  return task;
-}
-
-function runAmazonSearch(query) {
-  const cached = amazonSearchCache.get(query);
-  if (cached && Date.now() - cached.cachedAt < AMAZON_SEARCH_CACHE_MS) {
-    return Promise.resolve(cached.result);
-  }
-  if (amazonSearchInFlight.has(query)) return amazonSearchInFlight.get(query);
-
-  const task = amazonSearchQueue.then(async () => {
-    const waitMs = Math.max(
-      0,
-      AMAZON_MIN_REQUEST_INTERVAL_MS - (Date.now() - lastAmazonSearchAt)
-    );
-    if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
-    lastAmazonSearchAt = Date.now();
-    return callAmazonSearch(query);
-  });
-  amazonSearchQueue = task.catch(() => undefined);
-  const tracked = task.finally(() => amazonSearchInFlight.delete(query));
-  amazonSearchInFlight.set(query, tracked);
-  return tracked;
-}
+const runAmazonSearch = createAmazonSearchRunner({
+  pythonPath: PYTHON_PATH,
+  scriptPath: AMAZON_SEARCH_SCRIPT
+});
 
 function reloadDeals() {
   try {
@@ -167,23 +63,6 @@ function reloadDeals() {
   } catch (err) {
     console.error('Error reloading deals:', err);
   }
-}
-
-function getPincodeSearchSummary(pincode, filteredDeals = []) {
-  if (!pincode) return null;
-  return {
-    pincode,
-    live_delivery_verified: filteredDeals.some(deal => deal.delivery_status === 'verified_for_pincode'),
-    message: `Pincode ${pincode} applied; exact-pin delivery feeds are not connected.`
-  };
-}
-
-function isAmazonSearchConfigured() {
-  return Boolean(
-    process.env.AMAZON_ACCESS_KEY &&
-    process.env.AMAZON_SECRET_KEY &&
-    process.env.AMAZON_PARTNER_TAG
-  );
 }
 
 // Initial load
@@ -226,129 +105,11 @@ const server = http.createServer(async (req, res) => {
 
   // API: GET /api/deals
   if (pathname === '/api/deals' && req.method === 'GET') {
-    const q = String(parsedUrl.query.q || '').trim();
-    const platform = String(parsedUrl.query.platform || 'all').toLowerCase();
-    const category = String(parsedUrl.query.category || 'all').toLowerCase();
-    const minDiscount = Number.parseInt(parsedUrl.query.minDiscount || '0', 10);
-    const sortBy = String(parsedUrl.query.sortBy || 'best_match');
-    const verifiedOnly = parsedUrl.query.verified === 'true';
-    const liveRequested = parsedUrl.query.live !== 'false';
-    const pincode = parsedUrl.query.pin === undefined
-      ? null
-      : String(parsedUrl.query.pin).trim();
-
-    if (q.length > 120) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Search keywords must be 120 characters or fewer.' }));
-      return;
-    }
-    if (pincode !== null && !hasSixDigitPincodeFormat(pincode)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'pin must contain exactly 6 digits.' }));
-      return;
-    }
-    if (!Number.isInteger(minDiscount) || minDiscount < 0 || minDiscount > 100) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'minDiscount must be between 0 and 100.' }));
-      return;
-    }
-
-    let provider = {
-      status: liveRequested ? 'not_requested' : 'live_required',
-      provider: 'amazon_paapi',
-      message: liveRequested
-        ? 'Live merchant search runs when you submit a search.'
-        : 'Saved listings are not returned; enable live search to query a merchant.'
-    };
-    let ai = {
-      status: process.env.OPENAI_API_KEY ? 'pending' : 'not_configured',
-      message: process.env.OPENAI_API_KEY
-        ? 'AI is preparing the retailer search query.'
-        : 'AI query understanding is not configured; live search uses the original keywords.'
-    };
-    let providerQuery = q;
-    let liveDeals = [];
-    if (liveRequested && q.length >= 2) {
-      if (!isAmazonSearchConfigured()) {
-        provider = {
-          status: 'unavailable',
-          provider: 'amazon_paapi',
-          message: 'Amazon live search needs approved PA-API access and credentials.'
-        };
-        ai = {
-          status: process.env.OPENAI_API_KEY ? 'skipped_no_live_source' : 'not_configured',
-          message: 'AI does not invent deal data; connect a live merchant source before using AI for search.'
-        };
-      } else {
-        try {
-          const interpreted = await understandSearchQuery(q, {
-            apiKey: process.env.OPENAI_API_KEY,
-            model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
-          });
-          providerQuery = interpreted.searchQuery;
-          ai = { status: interpreted.status, message: interpreted.message };
-          const result = await runAmazonSearch(providerQuery);
-          provider = {
-            status: result.status || 'error',
-            provider: result.provider || 'amazon_paapi',
-            message: result.message || (
-              result.status === 'ok'
-                ? `Checked Amazon just now; ${result.deals.length} listings returned.`
-                : 'Amazon live search is unavailable.'
-            )
-          };
-          if (result.status === 'ok') liveDeals = result.deals || [];
-        } catch (error) {
-          console.error(`[Amazon PA-API] Search error: ${error.message}`);
-          provider = {
-            status: 'error',
-            provider: 'amazon_paapi',
-            message: 'Amazon live search failed. Check the server logs.'
-          };
-        }
-      }
-    } else if (liveRequested && q.length < 2) {
-      provider = {
-        status: 'query_too_short',
-        provider: 'amazon_paapi',
-        message: 'Enter at least 2 characters to search live merchant sources.'
-      };
-    }
-
-    if (!q && platform === 'all' && category === 'all') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        total: 0,
-        deals: [],
-        provider,
-        ai,
-        search_query: providerQuery,
-        search_mode: 'live_only',
-        ...(pincode ? { location: getPincodeSearchSummary(pincode) } : {})
-      }));
-      return;
-    }
-
-    const ranked = rankDeals(liveDeals, {
-      query: providerQuery,
-      platform,
-      category,
-      minDiscount,
-      verifiedOnly
+    const { statusCode, payload } = await handleDealsRequest(parsedUrl.query, {
+      runLiveSearch: runAmazonSearch
     });
-    const locationScoped = pincode ? filterDealsForPincode(ranked, pincode) : ranked;
-    const filtered = sortDeals(locationScoped, sortBy);
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      total: filtered.length,
-      deals: filtered,
-      provider,
-      ai,
-      search_query: providerQuery,
-      search_mode: 'live_only',
-      ...(pincode ? { location: getPincodeSearchSummary(pincode, filtered) } : {})
-    }));
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
     return;
   }
 
@@ -357,38 +118,17 @@ const server = http.createServer(async (req, res) => {
     const pincode = parsedUrl.query.pin === undefined
       ? null
       : String(parsedUrl.query.pin).trim();
-    if (pincode !== null && !hasSixDigitPincodeFormat(pincode)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'pin must contain exactly 6 digits.' }));
-      return;
-    }
-    const amazonConfigured = isAmazonSearchConfigured();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ...getProviderDirectory({ amazonConfigured, pincode }),
-      ai: {
-        configured: Boolean(process.env.OPENAI_API_KEY),
-        provider: 'OpenAI-compatible Chat Completions',
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
-      }
-    }));
+    const { statusCode, payload } = buildProvidersResponse({ pincode });
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
     return;
   }
 
   // API: GET /api/stats
   if (pathname === '/api/stats' && req.method === 'GET') {
-    const totalDeals = deals.length;
-    const totalSavings = deals.reduce((acc, d) => acc + (d.savings || 0), 0);
-    const avgDiscount = totalDeals ? Math.round(deals.reduce((acc, d) => acc + d.discount_pct, 0) / totalDeals) : 0;
-    const platforms = [...new Set(deals.map(d => d.platform))];
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      totalDeals,
-      totalSavings,
-      avgDiscount,
-      platforms
-    }));
+    const { statusCode, payload } = buildStatsResponse({ crawledDeals: deals });
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
     return;
   }
 

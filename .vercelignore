@@ -1,0 +1,19 @@
+# Never deploy local secrets or machine-only files.
+.env
+.git
+*.png
+*.log
+start.local.sh
+docker-compose.yml
+migrations/
+.github/
+tests/
+IMPROVEMENTS.md
+
+# Locally crawled data is NOT part of the public deployment (demo catalog stays).
+data/deals.json
+data/crawler_status.json
+
+# Python build artifacts
+__pycache__/
+*.pyc
