@@ -4,22 +4,60 @@ const path = require('path');
 const url = require('url');
 const { spawn } = require('child_process');
 
-const PORT = process.env.PORT || 3000;
+const {
+  buildProvidersResponse,
+  buildStatsResponse,
+  handleDealsRequest,
+  isAmazonSearchConfigured
+} = require('./search_pipeline');
+const { createAmazonSearchRunner } = require('./amazon_live_search');
+
+function loadLocalEnv() {
+  const envFile = path.join(__dirname, '.env');
+  if (!fs.existsSync(envFile)) return;
+  const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!match || Object.prototype.hasOwnProperty.call(process.env, match[1])) continue;
+    let value = match[2];
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[match[1]] = value;
+  }
+}
+
+loadLocalEnv();
+
+const PORT = Number(process.env.PORT || 3000);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error('PORT must be an integer between 1 and 65535.');
+}
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'deals.json');
 const STATUS_FILE = path.join(DATA_DIR, 'crawler_status.json');
 const PYTHON_PATH = process.env.PYTHON_PATH || 'python3';
 const CRAWLER_SCRIPT = path.join(__dirname, 'scraper', 'deals_crawler.py');
+const AMAZON_SEARCH_SCRIPT = path.join(__dirname, 'scraper', 'amazon_paapi.py');
 
 // Live in-memory cache of deals
 let deals = [];
 let isCrawling = false;
+const runAmazonSearch = createAmazonSearchRunner({
+  pythonPath: PYTHON_PATH,
+  scriptPath: AMAZON_SEARCH_SCRIPT
+});
 
 function reloadDeals() {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const raw = fs.readFileSync(DATA_FILE, 'utf8');
-      deals = JSON.parse(raw);
+      const loaded = JSON.parse(raw);
+      if (!Array.isArray(loaded)) throw new Error('deals.json must contain an array');
+      deals = loaded;
       console.log(`[Cache] Reloaded ${deals.length} deals into memory.`);
     }
   } catch (err) {
@@ -50,7 +88,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon'
 };
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
   const pathname = parsedUrl.pathname;
 
@@ -67,69 +105,30 @@ const server = http.createServer((req, res) => {
 
   // API: GET /api/deals
   if (pathname === '/api/deals' && req.method === 'GET') {
-    const q = (parsedUrl.query.q || '').toLowerCase().trim();
-    const platform = (parsedUrl.query.platform || 'all').toLowerCase();
-    const category = (parsedUrl.query.category || 'all').toLowerCase();
-    const minDiscount = parseInt(parsedUrl.query.minDiscount || '0', 10);
-    const sortBy = parsedUrl.query.sortBy || 'discount_desc';
-    const verifiedOnly = parsedUrl.query.verified === 'true';
-
-    // If no search query and platform is all, return empty (clean search tool state)
-    if (!q && platform === 'all' && category === 'all') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        total: 0,
-        deals: []
-      }));
-      return;
-    }
-
-    let filtered = deals.filter(d => {
-      if (platform !== 'all' && d.platform.toLowerCase() !== platform) return false;
-      if (category !== 'all' && !d.category.toLowerCase().includes(category) && !d.subcategory.toLowerCase().includes(category)) return false;
-      if (d.discount_pct < minDiscount) return false;
-      if (verifiedOnly && !d.in_stock) return false;
-      if (q) {
-        const text = `${d.title} ${d.brand} ${d.category} ${d.size} ${d.platform}`.toLowerCase();
-        const words = q.split(/\s+/);
-        const match = words.every(w => text.includes(w));
-        if (!match) return false;
-      }
-      return true;
+    const { statusCode, payload } = await handleDealsRequest(parsedUrl.query, {
+      runLiveSearch: runAmazonSearch
     });
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
+    return;
+  }
 
-    if (sortBy === 'discount_desc') {
-      filtered.sort((a, b) => b.discount_pct - a.discount_pct || b.savings - a.savings);
-    } else if (sortBy === 'price_asc') {
-      filtered.sort((a, b) => a.price - b.price);
-    } else if (sortBy === 'price_desc') {
-      filtered.sort((a, b) => b.price - a.price);
-    } else if (sortBy === 'savings_desc') {
-      filtered.sort((a, b) => b.savings - a.savings);
-    }
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      total: filtered.length,
-      deals: filtered
-    }));
+  // API: GET /api/providers
+  if (pathname === '/api/providers' && req.method === 'GET') {
+    const pincode = parsedUrl.query.pin === undefined
+      ? null
+      : String(parsedUrl.query.pin).trim();
+    const { statusCode, payload } = buildProvidersResponse({ pincode });
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
     return;
   }
 
   // API: GET /api/stats
   if (pathname === '/api/stats' && req.method === 'GET') {
-    const totalDeals = deals.length;
-    const totalSavings = deals.reduce((acc, d) => acc + (d.savings || 0), 0);
-    const avgDiscount = totalDeals ? Math.round(deals.reduce((acc, d) => acc + d.discount_pct, 0) / totalDeals) : 0;
-    const platforms = [...new Set(deals.map(d => d.platform))];
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      totalDeals,
-      totalSavings,
-      avgDiscount,
-      platforms
-    }));
+    const { statusCode, payload } = buildStatsResponse({ crawledDeals: deals });
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
     return;
   }
 
@@ -140,7 +139,12 @@ const server = http.createServer((req, res) => {
       if (fs.existsSync(STATUS_FILE)) {
         status = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf8'));
       }
-    } catch (e) {}
+    } catch (error) {
+      console.error(`[Crawler] Could not read status file: ${error.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Crawler status is temporarily unavailable.' }));
+      return;
+    }
     if (isCrawling) status.status = 'running';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(status));
@@ -159,6 +163,18 @@ const server = http.createServer((req, res) => {
     console.log('[Crawler] Background crawler execution triggered via API...');
 
     const proc = spawn(PYTHON_PATH, [CRAWLER_SCRIPT, '--run-once']);
+    proc.on('error', error => {
+      isCrawling = false;
+      console.error(`[Crawler] Unable to start source scan: ${error.message}`);
+      try {
+        fs.writeFileSync(STATUS_FILE, JSON.stringify({
+          status: 'error',
+          message: 'Could not start the source scan. Check Python runtime configuration.'
+        }, null, 2));
+      } catch (statusError) {
+        console.error(`[Crawler] Could not persist scan error: ${statusError.message}`);
+      }
+    });
 
     proc.stdout.on('data', data => {
       console.log(`[Crawler stdout] ${data.toString().trim()}`);
@@ -171,13 +187,23 @@ const server = http.createServer((req, res) => {
     proc.on('close', code => {
       isCrawling = false;
       console.log(`[Crawler] Completed with exit code ${code}.`);
+      if (code !== 0) {
+        try {
+          fs.writeFileSync(STATUS_FILE, JSON.stringify({
+            status: 'error',
+            message: `Source scan exited with code ${code}. Check server logs.`
+          }, null, 2));
+        } catch (error) {
+          console.error(`[Crawler] Could not persist scan failure: ${error.message}`);
+        }
+      }
       reloadDeals();
     });
 
     res.writeHead(202, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'started',
-      message: 'Live crawler started across Amazon, Flipkart, Myntra, and Blinkit.'
+      message: 'Authorized-source scan started. Only configured provider feeds can return fresh listings.'
     }));
     return;
   }
@@ -185,19 +211,52 @@ const server = http.createServer((req, res) => {
   // API: POST /api/convert-link
   if (pathname === '/api/convert-link' && req.method === 'POST') {
     let body = '';
-    req.on('data', chunk => body += chunk);
+    let payloadTooLarge = false;
+    req.on('data', chunk => {
+      if (payloadTooLarge) return;
+      if (body.length + chunk.length > 4096) {
+        payloadTooLarge = true;
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Link conversion payload is too large.' }));
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
+      if (payloadTooLarge) return;
       try {
         const { targetUrl, amazonTag } = JSON.parse(body || '{}');
-        let finalUrl = targetUrl;
-        if (targetUrl && targetUrl.includes('amazon.in')) {
-          const tag = amazonTag || 'dealsfinder-21';
-          const sep = targetUrl.includes('?') ? '&' : '?';
-          finalUrl = `${targetUrl}${sep}tag=${tag}`;
+        const target = new URL(String(targetUrl || ''));
+        const hostname = target.hostname.toLowerCase();
+        const allowedHosts = [
+          'amazon.in', '.amazon.in',
+          'flipkart.com', '.flipkart.com',
+          'myntra.com', '.myntra.com',
+          'blinkit.com', '.blinkit.com'
+        ];
+        const allowed = target.protocol === 'https:' && allowedHosts.some(host =>
+          host.startsWith('.') ? hostname.endsWith(host) : hostname === host
+        );
+        if (!allowed) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Only supported retailer HTTPS links can be converted.' }));
+          return;
         }
+        if (hostname === 'amazon.in' || hostname.endsWith('.amazon.in')) {
+          if (amazonTag) {
+            if (!/^[a-zA-Z0-9-]{1,64}$/.test(amazonTag)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Amazon Associates tag is invalid.' }));
+              return;
+            }
+            target.searchParams.set('tag', amazonTag);
+          }
+        }
+        const finalUrl = target.toString();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ originalUrl: targetUrl, affiliateUrl: finalUrl }));
-      } catch (e) {
+      } catch (error) {
+        console.error(`[Affiliate] Invalid link-conversion request: ${error.message}`);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid payload' }));
       }

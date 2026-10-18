@@ -1,0 +1,13 @@
+{
+  "name": "dealsfinder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "India-focused product search MVP with clearly-labelled demo mode (no paid APIs, no scraping).",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/search_engine.test.js && node tests/provider_registry.test.js && node tests/ai_search.test.js && node tests/demo_search.test.js && node tests/live_search_api.test.js"
+  }
+}

@@ -1,0 +1,56 @@
+name: CI — Python checks
+
+on:
+  push:
+    branches: [ main, 'audit/improvements' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  python-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install scraper requirements
+        run: |
+          if [ -f scraper/requirements.txt ]; then
+            python -m pip install --upgrade pip
+            pip install -r scraper/requirements.txt
+          fi
+
+      - name: Run Python syntax check
+        run: |
+          set -e
+          PY_FILES=$(find . -type f -name "*.py" -not -path "./.git/*")
+          if [ -n "$PY_FILES" ]; then
+            python -m py_compile $PY_FILES
+          fi
+
+      - name: Run basic scraper smoke test (non-failing)
+        run: |
+          if [ -f scraper/scraper_template.py ]; then
+            python scraper/scraper_template.py || true
+          fi
+
+      - name: Run engine tests
+        run: |
+          node tests/ai_search.test.js
+          node tests/live_search_api.test.js
+          node tests/search_engine.test.js
+          node tests/provider_registry.test.js
+          python -m unittest discover -s tests -p 'test_*.py'
+          node --check server.js
+          node --check ai_search.js
+          node --check public/app.js
+          node --check provider_registry.js
