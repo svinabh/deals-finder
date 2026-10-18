@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dealsfinder
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: dealsfinder
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  web:
+    image: node:16-bullseye
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: ["node", "server.js"]
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+      - redis
+
+  crawler:
+    image: python:3.9-slim
+    working_dir: /app/scraper
+    volumes:
+      - ./:/app
+    command: ["sh", "-c", "pip install --no-cache-dir -r requirements.txt && python3 deals_crawler.py --run-once"]
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  pgdata:
