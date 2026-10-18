@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-DealsFinder.AI — Master Live Crawler & Deals Ingestion Engine
-Continuously aggregates, scores, and updates verified high-discount deals across:
-- Amazon (63)
-- Flipkart (2)
-- Myntra (111)
-- Blinkit (Quick Commerce / Dark Store)
-"""
+"""Refresh configured, authorized merchant sources into the local deal index."""
 
 import argparse
 import json
@@ -70,33 +63,44 @@ def run_crawler_cycle(min_discount: int = 50, pincode: str = "283135") -> dict:
     start_time = time.time()
     now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     print(f"\n=======================================================")
-    print(f"🚀 Starting DealsFinder Live Crawler Cycle at {now_ist}")
-    print(f"   Target: Amazon, Flipkart, Myntra, Blinkit | Min Discount: {min_discount}%")
+    print(f"Starting DealsFinder authorized-source refresh at {now_ist}")
+    print(f"   Source: Amazon PA-API | Minimum listed discount: {min_discount}%")
     print(f"=======================================================")
 
     update_status({
         "status": "running",
         "started_at": now_ist,
-        "message": "Scanning Amazon, Flipkart, Myntra, and Blinkit for fresh deals..."
+        "message": "Checking configured authorized product sources..."
     })
 
     existing_deals = load_existing_deals()
     existing_map = {d["id"]: d for d in existing_deals if "id" in d}
     print(f"📂 Loaded {len(existing_deals)} existing deals from database.")
 
-    # 1. Scan E-Commerce (Amazon, Flipkart, Myntra)
+    # Only store data returned by an authorized provider. Other stores remain
+    # unavailable until their own approved product feeds are connected.
     ecom_deals = []
+    source_scan_succeeded = False
+    source_errors = []
     try:
-        ecom_deals = fetch_ecom_deals(min_discount=min_discount, max_items=100)
+        ecom_deals = fetch_ecom_deals(
+            min_discount=min_discount,
+            max_items=100,
+            search_queries=load_config().get("crawler_search_queries"),
+        )
+        source_scan_succeeded = True
     except Exception as e:
-        print(f"⚠️ E-Com Scraper Error: {e}")
+        source_errors.append(f"Amazon PA-API: {e}")
+        print(f"Amazon PA-API scan failed: {e}")
 
-    # 2. Scan Quick-Commerce (Blinkit)
+    # Blinkit has no approved feed configured; its former static sample catalog
+    # is intentionally not presented as live stock or pricing.
     blinkit_items = []
     try:
         blinkit_items = fetch_blinkit_deals(pincode=pincode, min_discount=20)
     except Exception as e:
-        print(f"⚠️ Blinkit Scraper Error: {e}")
+        source_errors.append(f"Blinkit: {e}")
+        print(f"Blinkit source error: {e}")
 
     scanned_total = len(ecom_deals) + len(blinkit_items)
     new_added = 0
@@ -115,23 +119,22 @@ def run_crawler_cycle(min_discount: int = 50, pincode: str = "283135") -> dict:
             existing_map[deal_id] = deal
             updated_count += 1
 
-    # Drop stale deals not seen by any crawler run in the last 48 hours
+    # Expire only records owned by a source that completed this cycle. A failed
+    # or unconfigured provider must not erase cached listings from other feeds.
     cutoff = datetime.now(IST) - timedelta(hours=48)
-    fresh_map = {}
     expired_count = 0
-    for deal_id, deal in existing_map.items():
-        seen = deal.get("last_seen")
-        try:
-            if seen and datetime.fromisoformat(seen) >= cutoff:
-                fresh_map[deal_id] = deal
-            elif seen:
+    if source_scan_succeeded:
+        for deal_id, deal in list(existing_map.items()):
+            if deal.get("source") != "amazon_paapi":
+                continue
+            seen = deal.get("last_checked_at") or deal.get("last_seen")
+            try:
+                if not seen or datetime.fromisoformat(seen) < cutoff:
+                    del existing_map[deal_id]
+                    expired_count += 1
+            except ValueError:
+                del existing_map[deal_id]
                 expired_count += 1
-            else:
-                # Legacy records without a timestamp: drop on next cycle
-                expired_count += 1
-        except ValueError:
-            expired_count += 1
-    existing_map = fresh_map
     if expired_count:
         print(f"🗑️ Removed {expired_count} stale deals not seen in the last 48h.")
 
@@ -140,7 +143,7 @@ def run_crawler_cycle(min_discount: int = 50, pincode: str = "283135") -> dict:
     merged_list.sort(key=lambda x: (x.get("discount_pct", 0), x.get("savings", 0)), reverse=True)
 
     # Cap to max limit if needed
-    merged_list = merged_list[:500]
+    merged_list = merged_list[:int(load_config().get("max_deals_in_database", 500))]
 
     save_deals(merged_list)
 
@@ -155,17 +158,23 @@ def run_crawler_cycle(min_discount: int = 50, pincode: str = "283135") -> dict:
         "total_scanned_in_cycle": scanned_total,
         "new_deals_added": new_added,
         "deals_updated": updated_count,
-        "platforms_active": ["Amazon", "Flipkart", "Myntra", "Blinkit"],
-        "message": f"Successfully updated deals database. Added {new_added} new deals ({duration}s)."
+        "platforms_active": ["Amazon"] if source_scan_succeeded else [],
+        "source_errors": source_errors,
+        "message": (
+            f"Updated Amazon listings: added {new_added}, refreshed {updated_count} "
+            f"in {duration}s."
+            if source_scan_succeeded
+            else "No authorized live source completed. Existing listings were kept; freshness is shown in search results."
+        )
     }
 
     update_status(result)
 
-    print(f"\n✅ Crawler cycle finished in {duration}s!")
+    print(f"\nSource refresh finished in {duration}s.")
     print(f"   - Scanned: {scanned_total} deals")
     print(f"   - New Added: {new_added} deals")
     print(f"   - Updated: {updated_count} deals")
-    print(f"   - Total Database: {len(merged_list)} verified deals")
+    print(f"   - Total Database: {len(merged_list)} indexed listings")
     print(f"=======================================================\n")
     return result
 
@@ -179,7 +188,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
-    min_discount = args.min_discount or config.get("min_discount_pct", 50)
+    min_discount = args.min_discount if args.min_discount is not None else config.get("min_discount_pct", 0)
     pincode = args.pincode or config.get("default_pincode", "283135")
     interval = args.interval or (config.get("update_interval_hours", 6) * 3600)
 

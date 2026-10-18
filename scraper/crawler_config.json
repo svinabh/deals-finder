@@ -1,11 +1,15 @@
 {
-  "crawler_name": "DealsFinder Live Multi-Platform Crawler",
-  "version": "1.0.0",
-  "min_discount_pct": 50,
-  "max_items_per_platform": 60,
+  "crawler_name": "DealsFinder Authorized Product Feed Crawler",
+  "version": "2.0.0",
+  "min_discount_pct": 0,
   "default_pincode": "283135",
   "default_city": "Shikohabad",
-  "target_platforms": ["Amazon", "Flipkart", "Myntra", "Blinkit"],
+  "target_platforms": ["Amazon"],
+  "crawler_search_queries": [
+    "smartphone",
+    "wireless earbuds",
+    "running shoes"
+  ],
   "categories": [
     "Fashion & Clothing",
     "Footwear & Shoes",

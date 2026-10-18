@@ -1,24 +1,20 @@
-# Improvements & Next Steps — Quick Action Plan
+# Engine status and next steps
 
-This branch contains a small, non-invasive starter set of improvements to move the project from a prototype to a more maintainable MVP. It focuses on:
+## Implemented in the current engine
 
-- separating responsibilities (scraper vs runtime server)
-- adding a simple production-minded scraper template
-- adding a minimal DB schema to move away from data/deals.json
-- adding helpful dev docs and CI checks
-- providing a docker-compose example for local dev
+- Search/ranking is separated into `search_engine.js`, with typo tolerance, common product synonyms, size and budget parsing, freshness-aware ranking, and explicit availability confidence.
+- Amazon live search uses the signed, official PA-API connector in `scraper/amazon_paapi.py`; it runs only on an explicit submitted search and only works when account access and credentials are configured.
+- The old Amazon HTML-search code path and hard-coded Blinkit sample results have been removed.
+- Existing JSON listings remain searchable, but cached listings are no longer presented as confirmed live stock.
+- Affiliate attribution is limited to the Amazon Associates tag for Amazon India links. Other stores require their own approved conversion route.
+- Search and provider tests run in CI.
 
-What I added in this branch (one atomic commit):
+## Still required before calling the product a multi-store live engine
 
-- IMPROVEMENTS.md — short roadmap & checklist
-- .env.example — environment variables to use in production/local
-- docker-compose.yml — local dev stack (Postgres, Redis, web, crawler)
-- migrations/init.sql — initial Postgres schema for products/deals/price_history
-- scraper/requirements.txt — python deps for scrapers
-- scraper/scraper_template.py — production-ready scraper template (retries, proxies, logging, sample parse)
-- .github/workflows/ci.yml — lightweight CI: python syntax check + requirements install if present
-- .github/PULL_REQUEST_TEMPLATE.md — PR checklist
+- Obtain/confirm Amazon PA-API access and verify the account's allowed request/display terms.
+- Obtain approved product feeds and affiliate link rules for Flipkart, Myntra, Blinkit or other retailers, then implement and test one adapter per source.
+- Add a feed timestamp/availability contract and a durable product/offer store before scaling beyond the local JSON index.
+- Validate canonical product/variant matching with real listings before describing a result as the absolute best across stores.
+- Add click attribution and conversion reconciliation only through approved affiliate programme mechanisms.
 
-Notes:
-- These changes are intentionally non-destructive and do not modify existing server.js or scraper behavior.
-- Next steps (if you want me to craft them): add DB integration in crawler, tests, sample platform scraper, open PR.
+Do not use page scraping, sample prices, or guessed affiliate URL prefixes as substitutes for source permissions.

@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DealsFinder.AI — Best Live Deals Across Amazon, Flipkart, Myntra & Blinkit</title>
-  <meta name="description" content="Search any product and find the best live discount across Amazon, Flipkart, Myntra and Blinkit.">
+  <title>DealsFinder — Find better prices in India</title>
+  <meta name="description" content="Search products by name, budget or size and compare matching offers from connected Indian stores.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="is-home">
   <!-- Header -->
   <header class="app-header">
     <div class="header-container">
@@ -23,7 +23,7 @@
             <line x1="12" y1="12" x2="21" y2="3"></line>
           </svg>
         </div>
-        <span class="brand-name">DealsFinder<span class="brand-accent">.AI</span></span>
+        <span class="brand-name">DealsFinder</span>
       </div>
 
       <div class="header-actions">
@@ -35,17 +35,17 @@
           <span id="activeLocationText">Shikohabad (283135)</span>
           <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
         </button>
-        <button class="action-btn" id="affiliateSettingsBtn" title="Affiliate settings">
+        <button class="action-btn" id="affiliateSettingsBtn" title="Affiliate settings" aria-label="Affiliate settings">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
           </svg>
-          <span>Monetize</span>
+          <span class="sr-only">Affiliate settings</span>
         </button>
-        <button class="action-btn scan-trigger-btn" id="triggerScanBtn" title="Scan for fresh deals">
+        <button class="action-btn scan-trigger-btn" id="triggerScanBtn" title="Scan for fresh deals" aria-label="Scan for fresh deals">
           <svg class="scan-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
           </svg>
-          <span id="scanBtnText">Scan Deals</span>
+          <span class="sr-only" id="scanBtnText">Scan Deals</span>
         </button>
       </div>
     </div>
@@ -54,8 +54,9 @@
   <main class="main-content">
     <!-- Hero & Search -->
     <section class="hero-section" id="heroSection">
-      <h1 class="hero-title">Search once. <span class="hero-accent">Get the best deal.</span></h1>
-      <p class="hero-subtitle">Live discounts across Amazon, Flipkart, Myntra & Blinkit.</p>
+      <p class="hero-eyebrow">A smarter way to shop in India</p>
+      <h1 class="hero-title">Kya dhoondh rahe ho?</h1>
+      <p class="hero-subtitle">Product, budget ya size likho. Hum matching offers dhoondhenge.</p>
 
       <div class="search-wrapper">
         <div class="search-bar" id="searchBar">
@@ -69,31 +70,36 @@
             type="text"
             id="searchInput"
             class="search-input"
-            placeholder="Search any product, brand or size…"
+            placeholder="Jaise: shoes under ₹3,000"
             autocomplete="off"
+            aria-label="Search products by name, brand, budget or size"
           >
           <button class="clear-btn" id="clearSearchBtn" title="Clear search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           </button>
-          <button class="search-action-btn" id="searchSubmitBtn">
-            <span>Find Deals</span>
+          <button class="search-action-btn" id="searchSubmitBtn" aria-label="Find deals">
+            <span>Find deals</span>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+              <path d="M5 12h14"></path>
+              <path d="m13 6 6 6-6 6"></path>
+            </svg>
           </button>
         </div>
 
         <div class="trending-chips" id="trendingChips">
-          <span class="trending-label">Trending:</span>
-          <button class="chip" data-query="skechers">Skechers</button>
-          <button class="chip" data-query="levis">Levi's Jeans</button>
-          <button class="chip" data-query="infrared">Infrared Cooktop</button>
-          <button class="chip" data-query="genteel">Godrej Genteel</button>
-          <button class="chip" data-query="blinkit">Blinkit</button>
+          <span class="trending-label">Try</span>
+          <button class="chip" data-query="skechers UK 7">Skechers · UK 7</button>
+          <button class="chip" data-query="infrared cooktop under 3000">Cooktop · under ₹3,000</button>
+          <button class="chip" data-query="Godrej Genteel">Godrej Genteel</button>
         </div>
+        <p class="provider-status" id="providerStatus" role="status">
+          Search product listings from connected sources. Prices and stock may change.
+        </p>
       </div>
 
       <div class="engine-idle-state" id="engineIdleState">
-        <div class="engine-hint">
-          <p class="hint-title">Start with a search</p>
-          <p class="hint-desc">Type any product above — shoes, jeans, appliances, groceries — and we'll surface the biggest verified discounts right now.</p>
+        <div class="engine-idle-card">
+          <p class="idle-desc">Search across available listings · compare prices · open the store to buy</p>
         </div>
       </div>
     </section>
@@ -115,7 +121,7 @@
             <select id="discountFilter" class="custom-select">
               <option value="0">Any</option>
               <option value="40">40%+</option>
-              <option value="50" selected>50%+</option>
+              <option value="50">50%+</option>
               <option value="60">60%+</option>
               <option value="70">70%+</option>
             </select>
@@ -124,7 +130,8 @@
           <div class="filter-dropdown-group">
             <label for="sortFilter" class="filter-label">Sort</label>
             <select id="sortFilter" class="custom-select">
-              <option value="discount_desc" selected>Biggest Discount</option>
+              <option value="best_match" selected>Best match</option>
+              <option value="discount_desc">Biggest listed discount</option>
               <option value="price_asc">Price: Low to High</option>
               <option value="price_desc">Price: High to Low</option>
               <option value="savings_desc">Max Savings (₹)</option>
@@ -132,9 +139,9 @@
           </div>
 
           <label class="toggle-pill" id="verifiedTogglePill" title="Only show in-stock deals">
-            <input type="checkbox" id="verifiedStockCheckbox" checked>
+            <input type="checkbox" id="verifiedStockCheckbox">
             <span class="toggle-switch"></span>
-            <span class="toggle-text">In stock only</span>
+            <span class="toggle-text">Confirmed in stock</span>
           </label>
         </div>
       </div>
@@ -165,7 +172,7 @@
         <button class="modal-close-btn" id="closeLocationModal">✕</button>
       </div>
       <div class="modal-body">
-        <p class="modal-instruction">Set your pin code to see quick-commerce deals in your area.</p>
+        <p class="modal-instruction">Enter any 6-digit Indian PIN. It scopes local listings; exact delivery and stock need a live store feed.</p>
         <div class="input-with-icon">
           <span class="input-icon">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
@@ -179,6 +186,7 @@
           <button class="loc-chip" data-pin="110001" data-city="Delhi NCR">Delhi NCR</button>
           <button class="loc-chip" data-pin="226001" data-city="Lucknow">Lucknow</button>
         </div>
+        <p class="location-coverage-note">City shortcuts are optional. We check the 6-digit format; store delivery coverage is separate.</p>
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" id="cancelLocationModal">Cancel</button>
@@ -196,18 +204,14 @@
       </div>
       <div class="modal-body">
         <p class="modal-instruction">
-          Your tags are automatically appended to every deal link, so you earn commission on purchases made through them.
+          The Amazon Associates tag is added to Amazon India links only. Other stores stay direct until an approved affiliate integration is configured.
         </p>
         <div class="form-group">
-          <label for="amazonTagInput" class="form-label">Amazon Associate Tag</label>
-          <input type="text" id="amazonTagInput" class="modal-input" placeholder="e.g. yourname-21" value="dealsfinder-21">
-        </div>
-        <div class="form-group">
-          <label for="earnkaroCodeInput" class="form-label">EarnKaro / Cuelinks Base Link <span class="optional">(optional)</span></label>
-          <input type="text" id="earnkaroCodeInput" class="modal-input" placeholder="https://ekaro.in/enkr?url=">
+          <label for="amazonTagInput" class="form-label">Amazon Associates tracking ID</label>
+          <input type="text" id="amazonTagInput" class="modal-input" placeholder="e.g. yourstore-21">
         </div>
         <div class="info-alert">
-          Flipkart, Myntra and Blinkit links can be routed through EarnKaro or Cuelinks for higher payout.
+          Verify your active Associates tracking ID before sharing links. Affiliate commission is subject to each programme's approval and terms.
         </div>
       </div>
       <div class="modal-footer">
@@ -222,8 +226,8 @@
 
   <footer class="app-footer">
     <div class="footer-container">
-      <span class="footer-brand">DealsFinder<span class="brand-accent">.AI</span></span>
-      <span class="footer-text">Live deals from Amazon, Flipkart, Myntra & Blinkit · © 2026</span>
+      <span class="footer-brand">DealsFinder</span>
+      <span class="footer-text">Prices and stock can change; confirm details on the retailer site. Some links may earn commission · © 2026</span>
     </div>
   </footer>
 

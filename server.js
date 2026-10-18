@@ -4,72 +4,186 @@ const path = require('path');
 const url = require('url');
 const { spawn } = require('child_process');
 
-const PORT = process.env.PORT || 3000;
+const { rankDeals, sortDeals } = require('./search_engine');
+const {
+  filterDealsForPincode,
+  getProviderDirectory,
+  hasSixDigitPincodeFormat
+} = require('./provider_registry');
+const { understandSearchQuery } = require('./ai_search');
+
+function loadLocalEnv() {
+  const envFile = path.join(__dirname, '.env');
+  if (!fs.existsSync(envFile)) return;
+  const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!match || Object.prototype.hasOwnProperty.call(process.env, match[1])) continue;
+    let value = match[2];
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[match[1]] = value;
+  }
+}
+
+loadLocalEnv();
+
+const PORT = Number(process.env.PORT || 3000);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error('PORT must be an integer between 1 and 65535.');
+}
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'deals.json');
 const STATUS_FILE = path.join(DATA_DIR, 'crawler_status.json');
 const PYTHON_PATH = process.env.PYTHON_PATH || 'python3';
 const CRAWLER_SCRIPT = path.join(__dirname, 'scraper', 'deals_crawler.py');
-const LIVE_SEARCH_SCRIPT = path.join(__dirname, 'scraper', 'live_search.py');
+const AMAZON_SEARCH_SCRIPT = path.join(__dirname, 'scraper', 'amazon_paapi.py');
+const AMAZON_SEARCH_CACHE_MS = 5 * 60 * 1000;
+const AMAZON_SEARCH_TIMEOUT_MS = 15000;
+const AMAZON_MIN_REQUEST_INTERVAL_MS = 1100;
 
 // Live in-memory cache of deals
 let deals = [];
 let isCrawling = false;
+const amazonSearchCache = new Map();
+const amazonSearchInFlight = new Map();
+let amazonSearchQueue = Promise.resolve();
+let lastAmazonSearchAt = 0;
 
-// Live search state: one at a time, per-query cooldown, global cooldown
-let liveSearchBusy = false;
-let lastLiveSearchAt = 0;
-const liveSearchCooldown = new Map();
-
-function runLiveSearch(query) {
-  return new Promise((resolve) => {
-    if (liveSearchBusy) return resolve(false);
-    const now = Date.now();
-    if (now - lastLiveSearchAt < 8000) return resolve(false);
-    const last = liveSearchCooldown.get(query);
-    if (last && now - last < 60000) return resolve(false);
-
-    liveSearchBusy = true;
-    lastLiveSearchAt = now;
-    liveSearchCooldown.set(query, now);
-    console.log(`[LiveSearch] Searching live sources for "${query}"...`);
-
-    const proc = spawn(PYTHON_PATH, [LIVE_SEARCH_SCRIPT, query, '24']);
+function callAmazonSearch(query) {
+  const task = new Promise(resolve => {
+    const proc = spawn(PYTHON_PATH, [AMAZON_SEARCH_SCRIPT, query], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
     let settled = false;
-    const finish = (ok) => {
+    const finish = result => {
       if (settled) return;
       settled = true;
-      liveSearchBusy = false;
-      resolve(ok);
+      clearTimeout(timeout);
+      if (result.status === 'ok' || result.status === 'unavailable') {
+        amazonSearchCache.set(query, { result, cachedAt: Date.now() });
+        if (amazonSearchCache.size > 100) {
+          amazonSearchCache.delete(amazonSearchCache.keys().next().value);
+        }
+      }
+      resolve(result);
     };
-    proc.stdout.on('data', data => console.log(`[LiveSearch] ${data.toString().trim().slice(0, 200)}`));
-    proc.stderr.on('data', data => console.error(`[LiveSearch err] ${data.toString().trim().slice(0, 200)}`));
+    const timeout = setTimeout(() => {
+      proc.kill();
+      finish({
+        status: 'error',
+        provider: 'amazon_paapi',
+        message: 'Amazon live search timed out. Try again in a moment.'
+      });
+    }, AMAZON_SEARCH_TIMEOUT_MS);
+
+    proc.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+      if (stdout.length > 2 * 1024 * 1024) {
+        proc.kill();
+        finish({
+          status: 'error',
+          provider: 'amazon_paapi',
+          message: 'Amazon returned an unexpectedly large response.'
+        });
+      }
+    });
+    proc.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+      if (stderr.length > 4096) stderr = stderr.slice(-4096);
+    });
+    proc.on('error', error => {
+      console.error(`[Amazon PA-API] Unable to start provider: ${error.message}`);
+      finish({
+        status: 'error',
+        provider: 'amazon_paapi',
+        message: 'Amazon live search could not start. Check the configured Python runtime.'
+      });
+    });
     proc.on('close', code => {
-      if (code === 0) reloadDeals();
-      console.log(`[LiveSearch] Done (exit ${code}).`);
-      finish(code === 0);
+      if (settled) return;
+      if (code !== 0) {
+        console.error(`[Amazon PA-API] Provider exited ${code}: ${stderr.trim()}`);
+        finish({
+          status: 'error',
+          provider: 'amazon_paapi',
+          message: 'Amazon live search failed. Check provider configuration and logs.'
+        });
+        return;
+      }
+      try {
+        const result = JSON.parse(stdout);
+        finish(result);
+      } catch (error) {
+        console.error(`[Amazon PA-API] Invalid provider response: ${error.message}`);
+        finish({
+          status: 'error',
+          provider: 'amazon_paapi',
+          message: 'Amazon live search returned an invalid response.'
+        });
+      }
     });
-    proc.on('error', (err) => {
-      console.error('[LiveSearch] spawn error:', err.message);
-      finish(false);
-    });
-    setTimeout(() => {
-      try { proc.kill(); } catch (e) {}
-      finish(false);
-    }, 15000);
   });
+  return task;
+}
+
+function runAmazonSearch(query) {
+  const cached = amazonSearchCache.get(query);
+  if (cached && Date.now() - cached.cachedAt < AMAZON_SEARCH_CACHE_MS) {
+    return Promise.resolve(cached.result);
+  }
+  if (amazonSearchInFlight.has(query)) return amazonSearchInFlight.get(query);
+
+  const task = amazonSearchQueue.then(async () => {
+    const waitMs = Math.max(
+      0,
+      AMAZON_MIN_REQUEST_INTERVAL_MS - (Date.now() - lastAmazonSearchAt)
+    );
+    if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
+    lastAmazonSearchAt = Date.now();
+    return callAmazonSearch(query);
+  });
+  amazonSearchQueue = task.catch(() => undefined);
+  const tracked = task.finally(() => amazonSearchInFlight.delete(query));
+  amazonSearchInFlight.set(query, tracked);
+  return tracked;
 }
 
 function reloadDeals() {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const raw = fs.readFileSync(DATA_FILE, 'utf8');
-      deals = JSON.parse(raw);
+      const loaded = JSON.parse(raw);
+      if (!Array.isArray(loaded)) throw new Error('deals.json must contain an array');
+      deals = loaded;
       console.log(`[Cache] Reloaded ${deals.length} deals into memory.`);
     }
   } catch (err) {
     console.error('Error reloading deals:', err);
   }
+}
+
+function getPincodeSearchSummary(pincode, filteredDeals = []) {
+  if (!pincode) return null;
+  return {
+    pincode,
+    live_delivery_verified: filteredDeals.some(deal => deal.delivery_status === 'verified_for_pincode'),
+    message: `Pincode ${pincode} applied; exact-pin delivery feeds are not connected.`
+  };
+}
+
+function isAmazonSearchConfigured() {
+  return Boolean(
+    process.env.AMAZON_ACCESS_KEY &&
+    process.env.AMAZON_SECRET_KEY &&
+    process.env.AMAZON_PARTNER_TAG
+  );
 }
 
 // Initial load
@@ -112,70 +226,151 @@ const server = http.createServer(async (req, res) => {
 
   // API: GET /api/deals
   if (pathname === '/api/deals' && req.method === 'GET') {
-    const q = (parsedUrl.query.q || '').toLowerCase().trim();
-    const platform = (parsedUrl.query.platform || 'all').toLowerCase();
-    const category = (parsedUrl.query.category || 'all').toLowerCase();
-    const minDiscount = parseInt(parsedUrl.query.minDiscount || '0', 10);
-    const sortBy = parsedUrl.query.sortBy || 'discount_desc';
+    const q = String(parsedUrl.query.q || '').trim();
+    const platform = String(parsedUrl.query.platform || 'all').toLowerCase();
+    const category = String(parsedUrl.query.category || 'all').toLowerCase();
+    const minDiscount = Number.parseInt(parsedUrl.query.minDiscount || '0', 10);
+    const sortBy = String(parsedUrl.query.sortBy || 'best_match');
     const verifiedOnly = parsedUrl.query.verified === 'true';
+    const liveRequested = parsedUrl.query.live !== 'false';
+    const pincode = parsedUrl.query.pin === undefined
+      ? null
+      : String(parsedUrl.query.pin).trim();
 
-    // If no search query and platform is all, return empty (clean search tool state)
+    if (q.length > 120) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Search keywords must be 120 characters or fewer.' }));
+      return;
+    }
+    if (pincode !== null && !hasSixDigitPincodeFormat(pincode)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'pin must contain exactly 6 digits.' }));
+      return;
+    }
+    if (!Number.isInteger(minDiscount) || minDiscount < 0 || minDiscount > 100) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'minDiscount must be between 0 and 100.' }));
+      return;
+    }
+
+    let provider = {
+      status: liveRequested ? 'not_requested' : 'live_required',
+      provider: 'amazon_paapi',
+      message: liveRequested
+        ? 'Live merchant search runs when you submit a search.'
+        : 'Saved listings are not returned; enable live search to query a merchant.'
+    };
+    let ai = {
+      status: process.env.OPENAI_API_KEY ? 'pending' : 'not_configured',
+      message: process.env.OPENAI_API_KEY
+        ? 'AI is preparing the retailer search query.'
+        : 'AI query understanding is not configured; live search uses the original keywords.'
+    };
+    let providerQuery = q;
+    let liveDeals = [];
+    if (liveRequested && q.length >= 2) {
+      if (!isAmazonSearchConfigured()) {
+        provider = {
+          status: 'unavailable',
+          provider: 'amazon_paapi',
+          message: 'Amazon live search needs approved PA-API access and credentials.'
+        };
+        ai = {
+          status: process.env.OPENAI_API_KEY ? 'skipped_no_live_source' : 'not_configured',
+          message: 'AI does not invent deal data; connect a live merchant source before using AI for search.'
+        };
+      } else {
+        try {
+          const interpreted = await understandSearchQuery(q, {
+            apiKey: process.env.OPENAI_API_KEY,
+            model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+          });
+          providerQuery = interpreted.searchQuery;
+          ai = { status: interpreted.status, message: interpreted.message };
+          const result = await runAmazonSearch(providerQuery);
+          provider = {
+            status: result.status || 'error',
+            provider: result.provider || 'amazon_paapi',
+            message: result.message || (
+              result.status === 'ok'
+                ? `Checked Amazon just now; ${result.deals.length} listings returned.`
+                : 'Amazon live search is unavailable.'
+            )
+          };
+          if (result.status === 'ok') liveDeals = result.deals || [];
+        } catch (error) {
+          console.error(`[Amazon PA-API] Search error: ${error.message}`);
+          provider = {
+            status: 'error',
+            provider: 'amazon_paapi',
+            message: 'Amazon live search failed. Check the server logs.'
+          };
+        }
+      }
+    } else if (liveRequested && q.length < 2) {
+      provider = {
+        status: 'query_too_short',
+        provider: 'amazon_paapi',
+        message: 'Enter at least 2 characters to search live merchant sources.'
+      };
+    }
+
     if (!q && platform === 'all' && category === 'all') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         total: 0,
-        deals: []
+        deals: [],
+        provider,
+        ai,
+        search_query: providerQuery,
+        search_mode: 'live_only',
+        ...(pincode ? { location: getPincodeSearchSummary(pincode) } : {})
       }));
       return;
     }
 
-    const filterDeals = () => deals.filter(d => {
-      if (platform !== 'all' && d.platform.toLowerCase() !== platform) return false;
-      if (category !== 'all' && !d.category.toLowerCase().includes(category) && !d.subcategory.toLowerCase().includes(category)) return false;
-      // Fresh live results for this exact query bypass the discount threshold —
-      // user intent here is "find this product", not "find 50%+ off"
-      const isFreshLive = d.live && d.source_query === q &&
-        (Date.now() - new Date(d.last_seen || 0).getTime()) < 6 * 3600 * 1000;
-      if (!isFreshLive && d.discount_pct < minDiscount) return false;
-      if (verifiedOnly && !d.in_stock) return false;
-      if (q) {
-        const normalize = str => (str || '').toLowerCase().replace(/['"`]/g, '').replace(/[^a-z0-9\s]/g, ' ');
-        const cleanText = normalize(`${d.title} ${d.brand} ${d.category} ${d.subcategory || ''} ${d.size} ${d.platform}`);
-        const cleanQuery = normalize(q);
-        const words = cleanQuery.split(/\s+/).filter(Boolean);
-        const match = words.every(w => {
-          if (cleanText.includes(w)) return true;
-          // Stem trailing 's' for plural match
-          if (w.length > 3 && w.endsWith('s') && cleanText.includes(w.slice(0, -1))) return true;
-          return false;
-        });
-        if (!match) return false;
-      }
-      return true;
+    const ranked = rankDeals(liveDeals, {
+      query: providerQuery,
+      platform,
+      category,
+      minDiscount,
+      verifiedOnly
     });
-
-    let filtered = filterDeals();
-
-    // Live fallback: query has few local results → search live sources, then re-filter
-    if (q && q.length >= 4 && filtered.length < 5) {
-      await runLiveSearch(q);
-      filtered = filterDeals();
-    }
-
-    if (sortBy === 'discount_desc') {
-      filtered.sort((a, b) => b.discount_pct - a.discount_pct || b.savings - a.savings);
-    } else if (sortBy === 'price_asc') {
-      filtered.sort((a, b) => a.price - b.price);
-    } else if (sortBy === 'price_desc') {
-      filtered.sort((a, b) => b.price - a.price);
-    } else if (sortBy === 'savings_desc') {
-      filtered.sort((a, b) => b.savings - a.savings);
-    }
+    const locationScoped = pincode ? filterDealsForPincode(ranked, pincode) : ranked;
+    const filtered = sortDeals(locationScoped, sortBy);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       total: filtered.length,
-      deals: filtered
+      deals: filtered,
+      provider,
+      ai,
+      search_query: providerQuery,
+      search_mode: 'live_only',
+      ...(pincode ? { location: getPincodeSearchSummary(pincode, filtered) } : {})
+    }));
+    return;
+  }
+
+  // API: GET /api/providers
+  if (pathname === '/api/providers' && req.method === 'GET') {
+    const pincode = parsedUrl.query.pin === undefined
+      ? null
+      : String(parsedUrl.query.pin).trim();
+    if (pincode !== null && !hasSixDigitPincodeFormat(pincode)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'pin must contain exactly 6 digits.' }));
+      return;
+    }
+    const amazonConfigured = isAmazonSearchConfigured();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ...getProviderDirectory({ amazonConfigured, pincode }),
+      ai: {
+        configured: Boolean(process.env.OPENAI_API_KEY),
+        provider: 'OpenAI-compatible Chat Completions',
+        model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+      }
     }));
     return;
   }
@@ -204,7 +399,12 @@ const server = http.createServer(async (req, res) => {
       if (fs.existsSync(STATUS_FILE)) {
         status = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf8'));
       }
-    } catch (e) {}
+    } catch (error) {
+      console.error(`[Crawler] Could not read status file: ${error.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Crawler status is temporarily unavailable.' }));
+      return;
+    }
     if (isCrawling) status.status = 'running';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(status));
@@ -223,6 +423,18 @@ const server = http.createServer(async (req, res) => {
     console.log('[Crawler] Background crawler execution triggered via API...');
 
     const proc = spawn(PYTHON_PATH, [CRAWLER_SCRIPT, '--run-once']);
+    proc.on('error', error => {
+      isCrawling = false;
+      console.error(`[Crawler] Unable to start source scan: ${error.message}`);
+      try {
+        fs.writeFileSync(STATUS_FILE, JSON.stringify({
+          status: 'error',
+          message: 'Could not start the source scan. Check Python runtime configuration.'
+        }, null, 2));
+      } catch (statusError) {
+        console.error(`[Crawler] Could not persist scan error: ${statusError.message}`);
+      }
+    });
 
     proc.stdout.on('data', data => {
       console.log(`[Crawler stdout] ${data.toString().trim()}`);
@@ -235,13 +447,23 @@ const server = http.createServer(async (req, res) => {
     proc.on('close', code => {
       isCrawling = false;
       console.log(`[Crawler] Completed with exit code ${code}.`);
+      if (code !== 0) {
+        try {
+          fs.writeFileSync(STATUS_FILE, JSON.stringify({
+            status: 'error',
+            message: `Source scan exited with code ${code}. Check server logs.`
+          }, null, 2));
+        } catch (error) {
+          console.error(`[Crawler] Could not persist scan failure: ${error.message}`);
+        }
+      }
       reloadDeals();
     });
 
     res.writeHead(202, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'started',
-      message: 'Live crawler started across Amazon, Flipkart, Myntra, and Blinkit.'
+      message: 'Authorized-source scan started. Only configured provider feeds can return fresh listings.'
     }));
     return;
   }
@@ -249,19 +471,52 @@ const server = http.createServer(async (req, res) => {
   // API: POST /api/convert-link
   if (pathname === '/api/convert-link' && req.method === 'POST') {
     let body = '';
-    req.on('data', chunk => body += chunk);
+    let payloadTooLarge = false;
+    req.on('data', chunk => {
+      if (payloadTooLarge) return;
+      if (body.length + chunk.length > 4096) {
+        payloadTooLarge = true;
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Link conversion payload is too large.' }));
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
+      if (payloadTooLarge) return;
       try {
         const { targetUrl, amazonTag } = JSON.parse(body || '{}');
-        let finalUrl = targetUrl;
-        if (targetUrl && targetUrl.includes('amazon.in')) {
-          const tag = amazonTag || 'dealsfinder-21';
-          const sep = targetUrl.includes('?') ? '&' : '?';
-          finalUrl = `${targetUrl}${sep}tag=${tag}`;
+        const target = new URL(String(targetUrl || ''));
+        const hostname = target.hostname.toLowerCase();
+        const allowedHosts = [
+          'amazon.in', '.amazon.in',
+          'flipkart.com', '.flipkart.com',
+          'myntra.com', '.myntra.com',
+          'blinkit.com', '.blinkit.com'
+        ];
+        const allowed = target.protocol === 'https:' && allowedHosts.some(host =>
+          host.startsWith('.') ? hostname.endsWith(host) : hostname === host
+        );
+        if (!allowed) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Only supported retailer HTTPS links can be converted.' }));
+          return;
         }
+        if (hostname === 'amazon.in' || hostname.endsWith('.amazon.in')) {
+          if (amazonTag) {
+            if (!/^[a-zA-Z0-9-]{1,64}$/.test(amazonTag)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Amazon Associates tag is invalid.' }));
+              return;
+            }
+            target.searchParams.set('tag', amazonTag);
+          }
+        }
+        const finalUrl = target.toString();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ originalUrl: targetUrl, affiliateUrl: finalUrl }));
-      } catch (e) {
+      } catch (error) {
+        console.error(`[Affiliate] Invalid link-conversion request: ${error.message}`);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid payload' }));
       }
