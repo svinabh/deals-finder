@@ -1,0 +1,19 @@
+{
+  "crawler_name": "DealsFinder Live Multi-Platform Crawler",
+  "version": "1.0.0",
+  "min_discount_pct": 50,
+  "max_items_per_platform": 60,
+  "default_pincode": "283135",
+  "default_city": "Shikohabad",
+  "target_platforms": ["Amazon", "Flipkart", "Myntra", "Blinkit"],
+  "categories": [
+    "Fashion & Clothing",
+    "Footwear & Shoes",
+    "Household & Cleaning",
+    "Kitchen & Appliances",
+    "Grocery & Quick Commerce",
+    "Electronics & Tech"
+  ],
+  "update_interval_hours": 6,
+  "max_deals_in_database": 500
+}
