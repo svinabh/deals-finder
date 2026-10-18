@@ -233,36 +233,52 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderDeals(deals) {
     if (!deals || deals.length === 0) return;
 
-    dealsGrid.innerHTML = deals.map(deal => {
-      const platKey = deal.platform.toLowerCase();
-      const monetizedUrl = buildAffiliateLink(deal.url, deal.platform);
-      const image = deal.image ? escapeHtml(deal.image) : '';
-      const fallbackText = escapeHtml((deal.brand || deal.platform || 'D').charAt(0).toUpperCase());
+    const platformIcons = {
+      myntra: '🛍️',
+      flipkart: '📦',
+      amazon: '🛒',
+      blinkit: '⚡'
+    };
 
-      const metaBits = [
-        deal.brand ? `<span>${escapeHtml(deal.brand)}</span>` : '',
-        deal.size && deal.size !== 'Standard' ? `<span>${escapeHtml(deal.size)}</span>` : '',
-        deal.rating ? `<span class="meta-rating">★ ${deal.rating}</span>` : ''
-      ].filter(Boolean).join('<span class="meta-sep">·</span>');
+    dealsGrid.innerHTML = deals.map(deal => {
+      const platKey = (deal.platform || '').toLowerCase();
+      const monetizedUrl = buildAffiliateLink(deal.url, deal.platform);
+      const icon = platformIcons[platKey] || '🌐';
+
+      const metaParts = [];
+      if (deal.brand) metaParts.push(`<span class="brand-pill">${escapeHtml(deal.brand)}</span>`);
+      if (deal.size && deal.size !== 'Standard') metaParts.push(`<span class="size-pill">${escapeHtml(deal.size)}</span>`);
+      if (deal.rating) metaParts.push(`<span class="rating-pill">★ ${deal.rating}</span>`);
 
       return `
         <article class="deal-card" data-id="${deal.id}">
-          <div class="card-media">
-            <span class="media-fallback">${fallbackText}</span>
-            ${image ? `<img class="product-img" src="${image}" alt="${escapeHtml(deal.title)}" loading="lazy" decoding="async" onerror="this.remove()">` : ''}
-            <span class="platform-chip platform-${platKey}">${deal.platform}</span>
-            <span class="discount-pill">${deal.discount_pct}% OFF</span>
+          <div class="card-header-bar">
+            <span class="platform-chip platform-${platKey}">
+              <span class="platform-icon">${icon}</span>
+              ${escapeHtml(deal.platform)}
+            </span>
+            ${deal.discount_pct > 0 ? `<span class="discount-pill">-${deal.discount_pct}% OFF</span>` : ''}
+            ${deal.live ? '<span class="badge-live"><span class="live-pulse"></span>LIVE</span>' : ''}
           </div>
 
           <div class="card-body">
+            <div class="card-meta-row">
+              ${metaParts.join('')}
+            </div>
+
             <h3 class="card-title" title="${escapeHtml(deal.title)}">
               ${escapeHtml(deal.title)}
             </h3>
-            <div class="card-meta">${metaBits}</div>
+
             <div class="price-row">
               <span class="deal-price">₹${deal.price.toLocaleString('en-IN')}</span>
               <span class="mrp-price">₹${deal.mrp.toLocaleString('en-IN')}</span>
               <span class="save-tag">Save ₹${deal.savings.toLocaleString('en-IN')}</span>
+            </div>
+
+            <div class="card-footer-badges">
+              <span class="badge-stock">✓ ${escapeHtml(deal.badge || 'Verified In-Stock')}</span>
+              <span class="badge-pincode">${deal.pincode === 'All India' ? '🇮🇳 All India' : `📍 ${escapeHtml(deal.pincode)}`}</span>
             </div>
           </div>
 

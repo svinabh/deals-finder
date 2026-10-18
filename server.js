@@ -10,10 +10,55 @@ const DATA_FILE = path.join(DATA_DIR, 'deals.json');
 const STATUS_FILE = path.join(DATA_DIR, 'crawler_status.json');
 const PYTHON_PATH = process.env.PYTHON_PATH || 'python3';
 const CRAWLER_SCRIPT = path.join(__dirname, 'scraper', 'deals_crawler.py');
+const LIVE_SEARCH_SCRIPT = path.join(__dirname, 'scraper', 'live_search.py');
 
 // Live in-memory cache of deals
 let deals = [];
 let isCrawling = false;
+
+// Live search state: one at a time, per-query cooldown, global cooldown
+let liveSearchBusy = false;
+let lastLiveSearchAt = 0;
+const liveSearchCooldown = new Map();
+
+function runLiveSearch(query) {
+  return new Promise((resolve) => {
+    if (liveSearchBusy) return resolve(false);
+    const now = Date.now();
+    if (now - lastLiveSearchAt < 8000) return resolve(false);
+    const last = liveSearchCooldown.get(query);
+    if (last && now - last < 60000) return resolve(false);
+
+    liveSearchBusy = true;
+    lastLiveSearchAt = now;
+    liveSearchCooldown.set(query, now);
+    console.log(`[LiveSearch] Searching live sources for "${query}"...`);
+
+    const proc = spawn(PYTHON_PATH, [LIVE_SEARCH_SCRIPT, query, '24']);
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      liveSearchBusy = false;
+      resolve(ok);
+    };
+    proc.stdout.on('data', data => console.log(`[LiveSearch] ${data.toString().trim().slice(0, 200)}`));
+    proc.stderr.on('data', data => console.error(`[LiveSearch err] ${data.toString().trim().slice(0, 200)}`));
+    proc.on('close', code => {
+      if (code === 0) reloadDeals();
+      console.log(`[LiveSearch] Done (exit ${code}).`);
+      finish(code === 0);
+    });
+    proc.on('error', (err) => {
+      console.error('[LiveSearch] spawn error:', err.message);
+      finish(false);
+    });
+    setTimeout(() => {
+      try { proc.kill(); } catch (e) {}
+      finish(false);
+    }, 15000);
+  });
+}
 
 function reloadDeals() {
   try {
@@ -50,7 +95,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon'
 };
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url, true);
   const pathname = parsedUrl.pathname;
 
@@ -84,19 +129,38 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    let filtered = deals.filter(d => {
+    const filterDeals = () => deals.filter(d => {
       if (platform !== 'all' && d.platform.toLowerCase() !== platform) return false;
       if (category !== 'all' && !d.category.toLowerCase().includes(category) && !d.subcategory.toLowerCase().includes(category)) return false;
-      if (d.discount_pct < minDiscount) return false;
+      // Fresh live results for this exact query bypass the discount threshold —
+      // user intent here is "find this product", not "find 50%+ off"
+      const isFreshLive = d.live && d.source_query === q &&
+        (Date.now() - new Date(d.last_seen || 0).getTime()) < 6 * 3600 * 1000;
+      if (!isFreshLive && d.discount_pct < minDiscount) return false;
       if (verifiedOnly && !d.in_stock) return false;
       if (q) {
-        const text = `${d.title} ${d.brand} ${d.category} ${d.size} ${d.platform}`.toLowerCase();
-        const words = q.split(/\s+/);
-        const match = words.every(w => text.includes(w));
+        const normalize = str => (str || '').toLowerCase().replace(/['"`]/g, '').replace(/[^a-z0-9\s]/g, ' ');
+        const cleanText = normalize(`${d.title} ${d.brand} ${d.category} ${d.subcategory || ''} ${d.size} ${d.platform}`);
+        const cleanQuery = normalize(q);
+        const words = cleanQuery.split(/\s+/).filter(Boolean);
+        const match = words.every(w => {
+          if (cleanText.includes(w)) return true;
+          // Stem trailing 's' for plural match
+          if (w.length > 3 && w.endsWith('s') && cleanText.includes(w.slice(0, -1))) return true;
+          return false;
+        });
         if (!match) return false;
       }
       return true;
     });
+
+    let filtered = filterDeals();
+
+    // Live fallback: query has few local results → search live sources, then re-filter
+    if (q && q.length >= 4 && filtered.length < 5) {
+      await runLiveSearch(q);
+      filtered = filterDeals();
+    }
 
     if (sortBy === 'discount_desc') {
       filtered.sort((a, b) => b.discount_pct - a.discount_pct || b.savings - a.savings);
